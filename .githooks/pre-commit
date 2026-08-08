@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+#
+# Pre-commit gate: format, lint, test, audit, then block two specific things
+# from entering the history.
+#
+# Bypassing this hook with --no-verify is forbidden. If it fails, fix the
+# underlying issue — a hook you route around is a hook that isn't there.
+set -uo pipefail
+
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+fail() {
+    echo -e "${RED}$1${NC}" >&2
+    exit 1
+}
+
+# Only the paths that were actually staged. Captured before formatting, because
+# `cargo fmt` rewrites the whole tree and we need to know what to put back.
+STAGED_RUST="$(git diff --cached --name-only --diff-filter=ACM -- '*.rs')"
+STAGED_TOML="$(git diff --cached --name-only --diff-filter=ACM -- '*.toml')"
+
+if [ -z "$STAGED_RUST" ] && [ -z "$STAGED_TOML" ]; then
+    exit 0
+fi
+
+# Re-stage a formatter's edits to files that were already staged.
+#
+# `git add -u` is the obvious thing here and it is wrong: the formatter rewrites
+# the whole tree, not just the staged paths, so `-u` also sweeps unrelated
+# working-tree edits the author deliberately left out of this commit. Passing
+# the captured paths keeps the commit to what was actually staged.
+restage() {
+    [ -n "$1" ] || return 0
+    while IFS= read -r file; do
+        [ -n "$file" ] && git add -- "$file"
+    done <<<"$1"
+}
+
+echo "Formatting..."
+cargo fmt --all || fail "ERROR: cargo fmt failed."
+restage "$STAGED_RUST"
+
+echo "Linting..."
+cargo clippy --all-targets --all-features -- -D warnings \
+    || fail "ERROR: clippy found issues. Fix them, or use #[expect(lint, reason = \"...\")] with a real reason."
+
+echo "Testing..."
+cargo test --quiet || fail "ERROR: tests failed."
+
+if command -v cargo-deny >/dev/null 2>&1; then
+    echo "Auditing dependencies..."
+    cargo deny check || fail "ERROR: cargo deny found issues."
+else
+    echo -e "${YELLOW}NOTE: cargo-deny not installed — skipping dependency audit.${NC}"
+    echo "      Install with: cargo install cargo-deny"
+fi
+
+# Content gates on the staged diff. These catch the two things clippy cannot:
+# a dbg! that survives a rebase, and a suppression style that never goes stale.
+DIFF="$(git diff --cached --diff-filter=ACM -- '*.rs')"
+
+if grep -qE '^\+.*\bdbg!\(' <<<"$DIFF"; then
+    echo -e "${RED}ERROR: Found dbg!() in staged changes.${NC}" >&2
+    grep -nE '^\+.*\bdbg!\(' <<<"$DIFF" >&2
+    exit 1
+fi
+
+if grep -qE '^\+.*#\[allow\(' <<<"$DIFF"; then
+    echo -e "${RED}ERROR: Found #[allow(...)] in staged changes.${NC}" >&2
+    echo "Use #[expect(lint, reason = \"...\")] instead so stale suppressions warn." >&2
+    grep -nE '^\+.*#\[allow\(' <<<"$DIFF" >&2
+    exit 1
+fi
+
+echo -e "${GREEN}All checks passed.${NC}"

@@ -1,0 +1,65 @@
+# cargo-deny configuration
+# https://embarkstudios.github.io/cargo-deny/
+#
+# Posture: block on known vulnerabilities and on supply-chain source problems.
+# Do NOT block on unmaintained or yanked crates.
+#
+# Why: a transitive crate whose maintainer walked away carries a RUSTSEC
+# *unmaintained* advisory with no upgrade path. You cannot fix it without
+# forking whichever framework pulls it in, so blocking on it just makes the
+# repo undeployable for a problem you have no lever on. Vulnerabilities are
+# actionable; abandonment usually isn't.
+
+[advisories]
+version = 2
+db-urls = ["https://github.com/rustsec/advisory-db"]
+unmaintained = "none"
+yanked = "warn"
+# One line per RUSTSEC id, each with a comment saying why it's tolerated and
+# what would let you drop it. An ignore with no justification is a silent
+# downgrade of the whole check.
+ignore = []
+
+[licenses]
+version = 2
+# Don't fail when the allow list includes a license no dependency actually uses.
+# A fresh scaffold has few deps; the wide allow list is intentional headroom.
+unused-allowed-license = "allow"
+# There is no way to invert this into a deny-list — cargo-deny has no `deny`,
+# `copyleft`, or `allow-osi-fsf-free` field under [licenses]. Anything absent
+# here is denied by the tool's hardcoded default. GPL/AGPL/SSPL block by omission.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "OpenSSL",
+    "BSL-1.0",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+[licenses.private]
+# The root crate itself has no license field set. That's fine for unpublished binaries.
+ignore = true
+
+[bans]
+# Duplicate major versions are visible but not fatal — a transitive dep pinning
+# an older major is common and usually not worth a fork to resolve.
+multiple-versions = "warn"
+# A `*` version requirement means "whatever resolves today", which is not a pin.
+wildcards = "deny"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -1,0 +1,16 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Environment / secrets
+.env
+.env.local
+
+# Editor
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# grizzly-gate local report output
+grizzly-gate-report/
