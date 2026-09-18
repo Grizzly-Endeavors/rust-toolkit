@@ -26,14 +26,6 @@ Code comments, docstrings, and all documentation must describe the system **as i
 
 A stale pin fails in ways that look like real bugs, so the debugging time is spent before the cause is even suspected. **Also check the project is still maintained**, not just the latest version number — pinning to the newest release of something abandoned is worse than an outdated pin, because it invites building on a dependency that will force an expensive migration later. If the latest release is years old, the repo is archived, or upstream points to a successor, surface it rather than silently pinning the dead one.
 
-### Sub-agent orchestration
-
-When spawning sub-agents for parallel or delegated work, include this in every agent prompt:
-
-> **Do NOT run tests, linting, or formatting checks.** Do NOT attempt to commit changes. Focus only on implementing the requested changes. Verification will run centrally afterward.
-
-The orchestrating session runs `cargo fmt`, `cargo clippy`, and `cargo test --quiet` after all sub-agent work completes, then commits. This avoids conflicting commits from parallel branches, wasted cycles verifying incomplete work, and agents blocking on failures caused by another agent's in-flight changes.
-
 ### Working style
 
 - **Surface design decisions before finalizing.** Don't silently pick between architectural alternatives — present the shape and the tradeoff.
