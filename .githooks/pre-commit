@@ -20,9 +20,12 @@ fail() {
 # Only the paths that were actually staged. Captured before formatting, because
 # `cargo fmt` rewrites the whole tree and we need to know what to put back.
 STAGED_RUST="$(git diff --cached --name-only --diff-filter=ACM -- '*.rs')"
-STAGED_TOML="$(git diff --cached --name-only --diff-filter=ACM -- '*.toml')"
+# Cargo.lock belongs here alongside the manifests: a lockfile-only commit is a
+# dependency bump, which is the change most likely to pull in a new advisory.
+# Matching on '*.toml' alone would let it through the gate unaudited.
+STAGED_MANIFEST="$(git diff --cached --name-only --diff-filter=ACM -- '*.toml' 'Cargo.lock')"
 
-if [ -z "$STAGED_RUST" ] && [ -z "$STAGED_TOML" ]; then
+if [ -z "$STAGED_RUST" ] && [ -z "$STAGED_MANIFEST" ]; then
     exit 0
 fi
 
