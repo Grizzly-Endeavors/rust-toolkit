@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+#
+# SessionStart hook: put this plugin's bin/ first on the PATH of the session's
+# later Bash commands.
+#
+# Claude Code appends a plugin's bin/ to PATH after the system dirs, where
+# bin/cargo would not shadow the real cargo. An `export` line written to the
+# file named by $CLAUDE_ENV_FILE is applied to every later Bash command of the
+# session, so this hook writes one that prepends bin/.
+#
+# Prints nothing on stdout: a SessionStart hook's stdout is added to Claude's
+# context.
+set -u
+
+env_file="${CLAUDE_ENV_FILE:-}"
+[ -n "$env_file" ] || exit 0
+
+plugin_root="${CLAUDE_PLUGIN_ROOT:-}"
+if [ -z "$plugin_root" ]; then
+    if ! plugin_root="$(cd "$(dirname "$0")/.." && pwd -P)"; then
+        echo "rust-build: could not find the plugin dir from $0; the cargo wrapper is not first on PATH, so cargo builds run without the shared target pool" >&2
+        exit 1
+    fi
+fi
+
+# Single quotes keep the path literal when the env file is sourced, whatever it
+# contains; an embedded single quote becomes '\''.
+quoted_bin="$(printf '%s' "$plugin_root/bin" | sed "s/'/'\\\\''/g")"
+export_line="export PATH='${quoted_bin}':\"\$PATH\""
+
+# The hook runs on every SessionStart source (startup, resume, clear, compact,
+# fork), and a session can see several of them. Writing the line once keeps
+# PATH from gaining a copy each time.
+if [ -f "$env_file" ] && grep -qxF -- "$export_line" "$env_file"; then
+    exit 0
+fi
+
+if ! printf '%s\n' "$export_line" >>"$env_file"; then
+    echo "rust-build: could not write to CLAUDE_ENV_FILE ($env_file); the cargo wrapper is not first on PATH, so cargo builds run without the shared target pool" >&2
+    exit 1
+fi
