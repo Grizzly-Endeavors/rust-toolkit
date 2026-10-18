@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# cargo wrapper: runs build-type cargo commands with CARGO_TARGET_DIR leased from the
+# repo's build dir pool (see target-pool next to this file) and passes everything else
+# straight to the real cargo, which is the next `cargo` on PATH that is not this wrapper.
+#
+# Marker that lets copies of this wrapper skip each other on PATH: target-pool-cargo-wrapper
+
+set -u
+set -f
+
+marker=target-pool-cargo-wrapper
+
+say() { printf 'cargo (target-pool wrapper): %s\n' "$*" >&2; }
+
+parent_of() {
+	case $1 in
+		*/*) printf '%s\n' "${1%/*}" ;;
+		*) printf '.\n' ;;
+	esac
+}
+
+# Prints the absolute path of $1 with every symlink along the file itself resolved.
+resolve_path() {
+	local path=$1 link dir hops=0
+	while [ -L "$path" ] && [ "$hops" -lt 40 ]; do
+		link=$(readlink "$path") || break
+		case $link in
+			/*) path=$link ;;
+			*) path=$(parent_of "$path")/$link ;;
+		esac
+		hops=$((hops + 1))
+	done
+	dir=$(parent_of "$path")
+	dir=$(cd "${dir:-/}" 2>/dev/null && pwd -P) || return 1
+	printf '%s/%s\n' "$dir" "${path##*/}"
+}
+
+is_wrapper_copy() {
+	local first_line=
+	IFS= read -r first_line <"$1" 2>/dev/null
+	case $first_line in
+		'#!'*) grep -q "$marker" "$1" 2>/dev/null ;;
+		*) return 1 ;;
+	esac
+}
+
+# Prints the first cargo on PATH that is neither this wrapper nor a copy of it. It prints
+# the PATH entry, not the resolved file, because rustup's proxies dispatch on their name.
+find_real_cargo() {
+	local entry candidate resolved IFS=:
+	for entry in $PATH; do
+		candidate=${entry:-.}/cargo
+		if [ ! -f "$candidate" ] || [ ! -x "$candidate" ]; then
+			continue
+		fi
+		resolved=$(resolve_path "$candidate") || continue
+		[ "$resolved" = "$self" ] && continue
+		is_wrapper_copy "$candidate" && continue
+		printf '%s\n' "$candidate"
+		return 0
+	done
+	return 1
+}
+
+# Sets subcommand (the first argument after a leading +toolchain and cargo's global
+# options) and change_dir (the global -C dir).
+find_subcommand() {
+	subcommand=
+	change_dir=
+	case ${1:-} in +*) shift ;; esac
+	while [ $# -gt 0 ]; do
+		case $1 in
+			-C)
+				[ $# -ge 2 ] || return 0
+				change_dir=$2
+				shift 2
+				;;
+			-C?*)
+				change_dir=${1#-C}
+				shift
+				;;
+			--color | --config | -Z)
+				[ $# -ge 2 ] || return 0
+				shift 2
+				;;
+			--color=* | --config=* | -Z?* | -v* | -q | --verbose | --quiet | --frozen | --locked | --offline)
+				shift
+				;;
+			*) break ;;
+		esac
+	done
+	subcommand=${1:-}
+}
+
+# True when the subcommand compiles into the target dir.
+is_build_subcommand() {
+	case $subcommand in
+		build | check | clippy | test | run | doc | bench | rustc | rustdoc | fix | b | c | t | r | d | nextest) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+# Sets manifest_path and explicit_target_dir from the arguments before `--` (the rest
+# belong to the program cargo runs).
+find_path_options() {
+	manifest_path=
+	explicit_target_dir=
+	while [ $# -gt 0 ]; do
+		case $1 in
+			--) return 0 ;;
+			--target-dir | --target-dir=*) explicit_target_dir=1 ;;
+			--manifest-path)
+				[ $# -ge 2 ] || return 0
+				manifest_path=$2
+				shift
+				;;
+			--manifest-path=*) manifest_path=${1#--manifest-path=} ;;
+		esac
+		shift
+	done
+}
+
+pool_disabled() {
+	case ${TARGET_POOL_DISABLE:-} in '' | 0) return 1 ;; *) return 0 ;; esac
+}
+
+self=$(resolve_path "${BASH_SOURCE[0]}") || {
+	say "couldn't resolve the wrapper's own path from ${BASH_SOURCE[0]}"
+	exit 127
+}
+
+if ! real_cargo=$(find_real_cargo); then
+	say "no real cargo found on PATH besides this wrapper ($self); install Rust (https://rustup.rs) or put its bin dir on PATH"
+	exit 127
+fi
+
+find_subcommand "$@"
+find_path_options "$@"
+
+if pool_disabled || [ -n "${CARGO_TARGET_DIR:-}" ] || [ -n "${CARGO_BUILD_TARGET_DIR:-}" ] ||
+	[ -n "${CARGO_BUILD_BUILD_DIR:-}" ] || [ -n "$explicit_target_dir" ] || ! is_build_subcommand; then
+	exec "$real_cargo" "$@"
+fi
+
+target_pool=$(parent_of "$self")/target-pool
+if [ ! -x "$target_pool" ]; then
+	say "target-pool is missing next to the wrapper at $target_pool; reinstall the plugin, or set TARGET_POOL_DISABLE=1 to build without the pool"
+	exit 1
+fi
+# -C and --manifest-path tell target-pool which project the command builds, so the
+# repo, the pool and a hand-off's workspace come from it rather than the current dir.
+exec "$target_pool" run ${change_dir:+-C "$change_dir"} ${manifest_path:+--manifest-path "$manifest_path"} -- "$real_cargo" "$@"

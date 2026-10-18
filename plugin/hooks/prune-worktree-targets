@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+#
+# SessionStart hook: delete the target/ dir of each idle worktree under
+# <main checkout>/.claude/worktrees/.
+#
+# A worktree is idle when nothing in it outside target/ and .git has changed
+# for TARGET_POOL_PRUNE_HOURS hours (default 24). Only <worktree>/target is
+# ever deleted: symlinks are refused, for the worktree dir and for target, and
+# so is any target that does not resolve to exactly <worktree>/target, and a
+# target without the CACHEDIR.TAG cargo writes is kept. The shared build pool under <main checkout>/target/ is never touched. The
+# worktree the session runs in is skipped, since the session may be about to
+# build there.
+#
+# It runs as an async hook, so a long scan or a large delete does not hold up
+# the session. When it deleted something, or failed to, it prints one JSON line
+# whose additionalContext summarises that; Claude Code hands an async hook's
+# additionalContext to Claude on the next turn. Otherwise it prints nothing.
+# Refusals and other details go to stderr. It always exits 0.
+set -u
+
+note() {
+    printf 'prune-worktree-targets: %s\n' "$*" >&2
+}
+
+# The session's cwd comes from the hook's stdin JSON. jq parses it when
+# installed; without jq a plain-path match is enough, and a value carrying JSON
+# escapes is left to the process cwd instead.
+session_cwd_from_stdin() {
+    [ -t 0 ] && return 0
+    local input
+    input="$(cat 2>/dev/null)" || return 0
+    [ -n "$input" ] || return 0
+    if command -v jq >/dev/null 2>&1; then
+        printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null
+        return 0
+    fi
+    printf '%s' "$input" | tr '\n' ' ' \
+        | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"\\]*\)".*/\1/p'
+}
+
+# Cargo writes a CACHEDIR.TAG (https://bford.info/cachedir/) into every target dir it
+# creates: the standard signature line first, then a comment naming cargo.
+made_by_cargo() {
+    local tag="$1/CACHEDIR.TAG" first=""
+    [ -f "$tag" ] && [ ! -L "$tag" ] || return 1
+    IFS= read -r first <"$tag" 2>/dev/null
+    [ "$first" = "Signature: 8a477f597d28d172789f06886806bc55" ] || return 1
+    case "$(cat "$tag" 2>/dev/null)" in
+        *"created by cargo"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+json_escape() {
+    printf '%s' "$1" | tr -d '\000-\037' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+prune_hours="${TARGET_POOL_PRUNE_HOURS:-24}"
+case "$prune_hours" in
+    '' | *[!0-9]*)
+        note "TARGET_POOL_PRUNE_HOURS='$prune_hours' is not a whole number of hours; using 24"
+        prune_hours=24
+        ;;
+esac
+prune_hours=$((10#$prune_hours))
+if [ "$prune_hours" -lt 1 ]; then
+    note "TARGET_POOL_PRUNE_HOURS must be at least 1; using 24"
+    prune_hours=24
+fi
+idle_minutes=$((prune_hours * 60))
+
+session_dir="$(session_cwd_from_stdin)"
+if [ -z "$session_dir" ] || [ ! -d "$session_dir" ]; then
+    session_dir="$PWD"
+fi
+cd "$session_dir" 2>/dev/null || exit 0
+
+common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || exit 0
+[ -n "$common_dir" ] || exit 0
+case "$common_dir" in
+    /*) ;;
+    *) common_dir="$session_dir/$common_dir" ;;
+esac
+common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || exit 0
+# A bare repo, or a submodule whose git dir lives under its parent's .git, has
+# no main checkout directly above its git dir.
+[ "${common_dir##*/}" = ".git" ] || exit 0
+main_checkout="${common_dir%/*}"
+[ -n "$main_checkout" ] || exit 0
+
+worktrees_dir="$main_checkout/.claude/worktrees"
+if [ -L "$main_checkout/.claude" ] || [ -L "$worktrees_dir" ]; then
+    note "refusing $worktrees_dir: it is reached through a symlink"
+    exit 0
+fi
+[ -d "$worktrees_dir" ] || exit 0
+worktrees_dir="$(cd "$worktrees_dir" && pwd -P)" || exit 0
+[ "$worktrees_dir" = "$main_checkout/.claude/worktrees" ] || exit 0
+
+session_toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || session_toplevel=""
+if [ -n "$session_toplevel" ]; then
+    session_toplevel="$(cd "$session_toplevel" 2>/dev/null && pwd -P)" || session_toplevel=""
+fi
+
+# Sessions starting together share one prune per main checkout, so two runs
+# never delete the same tree at once.
+lock_parent="${TMPDIR:-/tmp}"
+lock_parent="${lock_parent%/}"
+lock_key="$(printf '%s' "$main_checkout" | cksum | cut -d' ' -f1)"
+lock_dir="$lock_parent/rust-build-prune-$lock_key.lock"
+
+take_prune_lock() {
+    if mkdir "$lock_dir" 2>/dev/null; then
+        printf '%s\n' "$$" >"$lock_dir/pid"
+        return 0
+    fi
+    local holder
+    holder="$(cat "$lock_dir/pid" 2>/dev/null)"
+    if [ -n "$holder" ]; then
+        kill -0 "$holder" 2>/dev/null && return 1
+    elif [ -z "$(find "$lock_dir" -maxdepth 0 -mmin +60 2>/dev/null)" ]; then
+        # No PID yet: the holder is between mkdir and writing it.
+        return 1
+    fi
+    note "clearing a stale prune lock at $lock_dir"
+    rm -rf "$lock_dir"
+    mkdir "$lock_dir" 2>/dev/null || return 1
+    printf '%s\n' "$$" >"$lock_dir/pid"
+}
+
+take_prune_lock || exit 0
+trap 'rm -rf "$lock_dir"' EXIT
+trap 'exit 0' HUP INT TERM
+
+removed_names=""
+removed_count=0
+removed_kb=0
+failures=""
+
+for worktree in "$worktrees_dir"/*; do
+    name="${worktree##*/}"
+    if [ -L "$worktree" ]; then
+        note "refusing $worktree: the worktree dir is a symlink"
+        continue
+    fi
+    [ -d "$worktree" ] || continue
+    target="$worktree/target"
+    if [ -L "$target" ]; then
+        note "refusing $target: it is a symlink"
+        continue
+    fi
+    [ -d "$target" ] || continue
+
+    worktree_real="$(cd "$worktree" 2>/dev/null && pwd -P)" || continue
+    if [ "$worktree_real" != "$worktrees_dir/$name" ]; then
+        note "refusing $worktree: it resolves to $worktree_real"
+        continue
+    fi
+    [ "$worktree_real" = "$session_toplevel" ] && continue
+    target_real="$(cd "$target" 2>/dev/null && pwd -P)" || continue
+    if [ "$target_real" != "$worktree_real/target" ]; then
+        note "refusing $target: it resolves to $target_real"
+        continue
+    fi
+    case "$target_real" in
+        "$main_checkout"/target | "$main_checkout"/target/*)
+            note "refusing $target: it is inside the main checkout's target dir"
+            continue
+            ;;
+    esac
+    # The hook runs in every repo a session opens, so a target/ that cargo did not
+    # make (tracked files, another tool's data) is left alone.
+    if ! made_by_cargo "$target"; then
+        note "keeping $target: it has no CACHEDIR.TAG written by cargo, so it may not be build output"
+        continue
+    fi
+
+    # Any recent path outside target/ and .git keeps the worktree. A find that
+    # fails before printing anything prints the marker instead, which keeps
+    # the worktree too: nothing is deleted on an incomplete scan.
+    recent="$(cd "$worktree" 2>/dev/null && {
+        find . \( -path ./target -o -name .git \) -prune -o -mmin "-$idle_minutes" -print 2>/dev/null \
+            || echo "scan-failed"
+    } | head -n 1)"
+    [ -z "$recent" ] || continue
+
+    kb="$(du -sk "$target" 2>/dev/null | cut -f1)"
+    case "$kb" in '' | *[!0-9]*) kb=0 ;; esac
+    if rm_error="$(rm -rf -- "$target" 2>&1)" && [ ! -e "$target" ]; then
+        removed_count=$((removed_count + 1))
+        removed_kb=$((removed_kb + kb))
+        removed_names="${removed_names:+$removed_names, }$name"
+    else
+        rm_error="$(printf '%s' "$rm_error" | head -n 1)"
+        failures="${failures:+$failures; }$name (${rm_error:-target/ still present})"
+    fi
+done
+
+[ "$removed_count" -gt 0 ] || [ -n "$failures" ] || exit 0
+
+summary="rust-build:"
+if [ "$removed_count" -gt 0 ]; then
+    freed_gb="$(awk -v kb="$removed_kb" 'BEGIN { printf "%.1f", kb / 1048576 }')"
+    summary="$summary deleted target/ in $removed_count worktree(s) under $worktrees_dir idle for ${prune_hours}h or more (about $freed_gb GB freed): $removed_names."
+fi
+if [ -n "$failures" ]; then
+    summary="$summary could not delete target/ in: $failures."
+fi
+printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' \
+    "$(json_escape "$summary")"
+exit 0

@@ -1,0 +1,11 @@
+{
+  "name": "rust-build",
+  "version": "0.1.0",
+  "description": "Warm target-dir pool for parallel agent worktrees, plus skills on build speed and workspace splitting.",
+  "author": {
+    "name": "Grizzly Endeavors"
+  },
+  "homepage": "https://github.com/Grizzly-Endeavors/rust-toolkit",
+  "repository": "https://github.com/Grizzly-Endeavors/rust-toolkit",
+  "keywords": ["rust", "cargo", "build", "target-dir", "worktree", "agents"]
+}

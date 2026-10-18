@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Pre-commit gate: format, lint, test, audit, then block two specific things
-# from entering the history.
+# from entering the history. Changes under plugin/ get their own gate: shellcheck
+# and the plugin's test scripts.
 #
 # Bypassing this hook with --no-verify is forbidden. If it fails, fix the
 # underlying issue — a hook you route around is a hook that isn't there.
@@ -24,6 +25,18 @@ STAGED_RUST="$(git diff --cached --name-only --diff-filter=ACM -- '*.rs')"
 # dependency bump, which is the change most likely to pull in a new advisory.
 # Matching on '*.toml' alone would let it through the gate unaudited.
 STAGED_MANIFEST="$(git diff --cached --name-only --diff-filter=ACM -- '*.toml' 'Cargo.lock')"
+# Any staged path under plugin/, deletions included: removing a test script or a
+# bin file changes what the plugin's checks cover, so it must pass the gate too.
+STAGED_PLUGIN="$(git diff --cached --name-only -- plugin)"
+
+# The plugin's checks live in plugin/tests/run-all.sh. Generated projects delete
+# plugin/ (init.sh), so the script is absent there and this gate does nothing.
+# Runs before the Rust exit below so a plugin-only commit is checked too.
+if [ -n "$STAGED_PLUGIN" ] && [ -f plugin/tests/run-all.sh ]; then
+    echo "Checking plugin..."
+    env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE bash plugin/tests/run-all.sh \
+        || fail "ERROR: plugin checks failed. See the list above."
+fi
 
 if [ -z "$STAGED_RUST" ] && [ -z "$STAGED_MANIFEST" ]; then
     exit 0

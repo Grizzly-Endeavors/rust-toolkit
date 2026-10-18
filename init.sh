@@ -4,8 +4,9 @@
 #
 #   ./init.sh my-project
 #
-# Renames the crate, rewrites the docs, re-initializes git, and installs the
-# hooks. Deletes itself when done.
+# Renames the crate, rewrites the docs, removes plugin/ (the rust-build Claude
+# Code plugin belongs to the toolkit, not to generated projects), re-initializes
+# git, and installs the hooks. Deletes itself when done.
 set -euo pipefail
 
 RED='\033[0;31m'
@@ -39,6 +40,13 @@ grep -q "$PLACEHOLDER_KEBAB" Cargo.toml \
 NAME_SNAKE="${NAME//-/_}"
 
 echo "Initializing '$NAME'..."
+
+# The plugin is toolkit tooling. Remove it before the rewrite below so its files
+# are never touched by the rename.
+if [ -d plugin ]; then
+    rm -rf plugin
+    echo "  removed plugin/"
+fi
 
 # Rewrite both spellings: Cargo and the filesystem use kebab-case, Rust paths
 # use snake_case, and the two differ whenever the name contains a hyphen.

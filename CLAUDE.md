@@ -47,6 +47,8 @@ The `justfile` wraps these: `just test`, `just lint`, `just deny`, `just ci-loca
 
 **Pre-commit hooks** run fmt (auto-applied and re-staged) → clippy → tests → `cargo deny` if installed, then reject staged `dbg!()` and `#[allow(`. Install once with `./.githooks/install.sh` or `just hooks`. **Bypassing with `--no-verify` is forbidden.** If a hook fails, fix the underlying issue.
 
+**Parallel worktrees:** agent sessions that build in several git worktrees of the same repository should enable the `rust-build` Claude Code plugin from `https://github.com/Grizzly-Endeavors/rust-toolkit` (its `plugin/` directory). It leases warm Cargo target directories from a per-repository pool, so a new worktree does not start with a cold build. Projects generated from this template do not contain the plugin's files; install it from that repository.
+
 ## Naming
 
 - **Domain-specific names**: prefer descriptive names that match the domain (`send_chat_completion` over generic `run`, `spawn_widget_window` over `handle`).

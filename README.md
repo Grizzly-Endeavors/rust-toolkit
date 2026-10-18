@@ -14,6 +14,10 @@ cd my-project
 
 `init.sh` renames the crate, writes a fresh README, re-initializes git with a clean history, installs the hooks, and deletes itself. You get a project that builds and passes its own gate on the first commit.
 
+## The Claude Code plugin
+
+`plugin/` holds `rust-build`, a Claude Code plugin for projects whose agents build in parallel git worktrees. It keeps a pool of warm Cargo target directories so a fresh worktree doesn't pay a cold build, and it ships two skills on build speed and workspace splitting. It lives here in the toolkit, not in the generated project: `init.sh` deletes `plugin/` when it turns the template into a project. The pre-commit hook runs `plugin/tests/run-all.sh` (shellcheck over the plugin's shell scripts, then each plugin test) whenever a commit touches `plugin/`; `bash plugin/tests/run-all.sh` runs the same checks by hand. To install it, follow the steps in [plugin/README.md](https://github.com/Grizzly-Endeavors/rust-toolkit/blob/main/plugin/README.md), which also covers how it works and what it changes.
+
 ## What you need
 
 - **Rust** (stable — `rust-toolchain.toml` pins the channel and pulls `rustfmt` + `clippy`)
@@ -35,6 +39,7 @@ That's the whole tool list. There is no test-runner replacement, no coverage too
 | `.githooks/` | pre-commit and commit-msg, with a worktree-safe installer |
 | `CLAUDE.md` | The agent instructions — the same rules, in prose |
 | `src/` | A working skeleton that demonstrates four of the conventions |
+| `plugin/` | The `rust-build` Claude Code plugin: a warm target-dir pool for parallel agent worktrees, plus two skills. Not part of generated projects |
 
 The `src/` tree is small on purpose but not empty: `main.rs` is the thin-shell pattern, `lib.rs` is where logic goes, `config.rs` is a pure module with a sibling test file, and its env handling shows the Rust 2024 workaround. Delete it once you've read it.
 
