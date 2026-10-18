@@ -4,7 +4,7 @@
 
 set -u
 
-printf 'pid=%s target=%s args=%s\n' "$$" "${CARGO_TARGET_DIR:-<unset>}" "$*" >>"${STUB_LOG:?STUB_LOG must be set}"
+printf 'pid=%s cwd=%s target=%s args=%s\n' "$$" "$PWD" "${CARGO_TARGET_DIR:-<unset>}" "$*" >>"${STUB_LOG:?STUB_LOG must be set}"
 
 if [ "${1:-}" = metadata ]; then
 	if [ -n "${STUB_METADATA:-}" ]; then

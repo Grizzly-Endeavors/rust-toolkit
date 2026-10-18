@@ -26,7 +26,7 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.com
 export GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.com
 export GIT_CEILING_DIRECTORIES=$tmp_root
-unset CARGO_TARGET_DIR CARGO_BUILD_BUILD_DIR TARGET_POOL_SIZE TARGET_POOL_CAP_GB TARGET_POOL_CAP_KB TARGET_POOL_DISABLE
+unset CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR CARGO_BUILD_BUILD_DIR TARGET_POOL_SIZE TARGET_POOL_CAP_GB TARGET_POOL_CAP_KB TARGET_POOL_DISABLE
 
 started_pids=$tmp_root/started-pids
 cleanup() {
@@ -108,7 +108,7 @@ run_in() {
 }
 
 last_logged_target() {
-	tail -n 1 "$STUB_LOG" | sed 's/^pid=[0-9]* target=\(.*\) args=.*$/\1/'
+	tail -n 1 "$STUB_LOG" | sed 's/^pid=[0-9]* cwd=.* target=\(.*\) args=.*$/\1/'
 }
 
 expect_eq() {
@@ -171,7 +171,52 @@ test_pass_through_when_target_dir_set() {
 	expect_eq "$case_dir/own" "$(last_logged_target)" "CARGO_TARGET_DIR kept" || return 1
 	run_in "$wt1" env CARGO_BUILD_BUILD_DIR="$case_dir/build" cargo build || return 1
 	expect_eq "<unset>" "$(last_logged_target)" "no lease with CARGO_BUILD_BUILD_DIR" || return 1
+	run_in "$wt1" env CARGO_BUILD_TARGET_DIR="$case_dir/own" cargo build || return 1
+	expect_eq "<unset>" "$(last_logged_target)" "no lease with CARGO_BUILD_TARGET_DIR" || return 1
+	local var
+	for var in CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR CARGO_BUILD_BUILD_DIR; do
+		# shellcheck disable=SC2016 # the inner sh expands CARGO_TARGET_DIR
+		run_in "$wt1" env "$var=$case_dir/own" target-pool run -- sh -c 'printf "%s\n" "${CARGO_TARGET_DIR:-<unset>}"' || return 1
+		expect_eq "$([ "$var" = CARGO_TARGET_DIR ] && printf '%s' "$case_dir/own" || printf '<unset>')" "$(cat "$case_dir/out")" "target-pool run with $var set" || return 1
+	done
 	[ ! -d "$pool" ] || fail "pool created despite pass-through"
+}
+
+# -C and --manifest-path pick the project: its repo, its pool and the worktree the
+# lease is recorded for, resolved the way cargo resolves them.
+test_project_options_pick_the_repo() {
+	new_repo
+	mkdir -p "$case_dir/not-a-repo" "$wt1/sub"
+	run_in "$case_dir/not-a-repo" cargo build --manifest-path "$wt2/Cargo.toml" || return 1
+	expect_eq "$pool/0" "$(last_logged_target)" "--manifest-path into a repo leases from its pool" || return 1
+	slot_state "$repo" 0 | grep -q "last used by $wt2\$" || fail "lease not recorded for wt2: $(slot_state "$repo" 0)" || return 1
+	run_in "$case_dir/not-a-repo" cargo -C "$wt3" build || return 1
+	expect_eq "$pool/1" "$(last_logged_target)" "-C into a repo leases from its pool" || return 1
+	slot_state "$repo" 1 | grep -q "last used by $wt3\$" || fail "lease not recorded for wt3: $(slot_state "$repo" 1)" || return 1
+	run_in "$repo" cargo -C ../wt1 build --manifest-path=sub/Cargo.toml || return 1
+	expect_eq "$pool/2" "$(last_logged_target)" "relative --manifest-path resolves against -C" || return 1
+	slot_state "$repo" 2 | grep -q "last used by $wt1\$" || fail "lease not recorded for wt1: $(slot_state "$repo" 2)" || return 1
+	run_in "$case_dir/not-a-repo" cargo run -- --manifest-path "$wt1/Cargo.toml" || return 1
+	expect_eq "<unset>" "$(last_logged_target)" "--manifest-path after -- belongs to the program" || return 1
+	run_in "$wt1" cargo build --manifest-path "$case_dir/missing/Cargo.toml" || return 1
+	expect_eq "<unset>" "$(last_logged_target)" "a manifest dir that doesn't exist passes through"
+}
+
+# The hand-off lists the members of the workspace the command builds, not the one in
+# the current dir.
+test_hand_off_uses_the_built_workspace() {
+	new_repo
+	export TARGET_POOL_SIZE=1
+	workspace_metadata_json new "$wt2" >"$case_dir/metadata.json"
+	run_in "$wt1" env STUB_FINGERPRINTS="app-1111 serde-4444" cargo build || return 1
+	run_in "$repo" env STUB_METADATA="$case_dir/metadata.json" cargo build --manifest-path ../wt2/Cargo.toml || return 1
+	expect_status 0 "hand-off through --manifest-path" || return 1
+	grep -q "cwd=$repo target=<unset> args=metadata --no-deps --format-version 1 --offline --manifest-path ../wt2/Cargo.toml\$" "$STUB_LOG" ||
+		fail "metadata didn't get the command's --manifest-path: $(cat "$STUB_LOG")" || return 1
+	expect_eq "serde-4444 " "$(fingerprints_left "$pool/0")" "members cleared, deps kept" || return 1
+	run_in "$repo" env STUB_METADATA="$case_dir/metadata.json" cargo -C "$wt3" build || return 1
+	grep -q "cwd=$wt3 target=<unset> args=metadata --no-deps --format-version 1 --offline\$" "$STUB_LOG" ||
+		fail "metadata didn't run in the command's -C dir: $(cat "$STUB_LOG")"
 }
 
 test_pass_through_non_build_and_outside_repo() {
@@ -388,6 +433,67 @@ test_waits_when_all_busy() {
 	await_exit "$b" 15
 }
 
+# Deleting the pool while a run waits (`cargo clean` in the main checkout) must not
+# strand the waiter: it recreates the lock dir and takes the slot.
+test_waiter_survives_pool_deletion() {
+	new_repo
+	export TARGET_POOL_SIZE=1
+	start_bg "$case_dir/a.out" "$case_dir/a.err" in_dir "$wt1" env STUB_READY="$case_dir/a.ready" STUB_HOLD="$case_dir/go-a" cargo build
+	local a=$bg_pid
+	wait_until 15 test -e "$case_dir/a.ready" || fail "holder never started" || return 1
+	start_bg "$case_dir/c.out" "$case_dir/c.err" in_dir "$wt2" env STUB_READY="$case_dir/c.ready" STUB_HOLD="$case_dir/go-c" cargo build
+	local c=$bg_pid
+	wait_until 15 file_contains "$case_dir/c.err" "waiting" || fail "second run never said it was waiting" || return 1
+	rm -rf "${pool:?}"
+	wait_until 15 test -e "$case_dir/c.ready" || fail "waiting run didn't lease after the pool was deleted: $(cat "$case_dir/c.err")" || return 1
+	touch "$case_dir/go-a"
+	await_exit "$a" 15 && expect_eq 0 "$bg_status" "holder whose pool was deleted" || return 1
+	[ ! -s "$case_dir/a.err" ] || fail "holder's stderr: $(cat "$case_dir/a.err")" || return 1
+	slot_state "$wt2" 0 | grep -q "leased by pid $c " ||
+		fail "the old holder's release dropped the new holder's lock: $(slot_state "$wt2" 0)" || return 1
+	touch "$case_dir/go-c"
+	await_exit "$c" 15 && expect_eq 0 "$bg_status" "run that waited" || return 1
+	expect_eq 1 "$(wc -l <"$case_dir/c.err" | tr -d ' ')" "stderr lines from the waiting run (only the wait line)" || return 1
+	grep -q "the only build dir" "$case_dir/c.err" || fail "wait line for a one-dir pool: $(cat "$case_dir/c.err")"
+}
+
+# target-pool clean empties the free dirs, skips the leased ones and keeps the
+# bookkeeping files.
+test_clean() {
+	new_repo
+	export TARGET_POOL_SIZE=3
+	run_in "$wt1" target-pool clean || return 1
+	expect_status 0 "clean before any build" || return 1
+	grep -q "no build dirs yet" "$case_dir/out" || fail "clean with no pool: $(cat "$case_dir/out")" || return 1
+	run_in "$wt1" env STUB_FILL_KB=16 cargo build || return 1
+	run_in "$wt2" env STUB_FILL_KB=16 cargo build || return 1
+	start_bg "$case_dir/a.out" "$case_dir/a.err" in_dir "$wt3" env STUB_FILL_KB=16 STUB_READY="$case_dir/a.ready" STUB_HOLD="$case_dir/go" cargo build
+	local a=$bg_pid
+	wait_until 15 test -e "$case_dir/a.ready" || fail "holder never started" || return 1
+	expect_eq "$pool/2" "$(cat "$case_dir/a.ready")" "holder's dir" || return 1
+
+	run_in "$wt1" target-pool clean || return 1
+	expect_status 0 "clean with one dir leased" || return 1
+	expect_no_stderr "clean" || return 1
+	grep -q "emptied build dir $pool/0 " "$case_dir/out" && grep -q "emptied build dir $pool/1 " "$case_dir/out" ||
+		fail "clean didn't report the emptied dirs: $(cat "$case_dir/out")" || return 1
+	grep -q "skipped build dir $pool/2: leased by pid $a;" "$case_dir/out" ||
+		fail "clean didn't name the leased dir: $(cat "$case_dir/out")" || return 1
+	expect_eq "" "$(ls -A "$pool/0")" "dir 0 after clean" || return 1
+	expect_eq "" "$(ls -A "$pool/1")" "dir 1 after clean" || return 1
+	[ -f "$pool/2/fill" ] || fail "clean touched the leased dir" || return 1
+	[ -f "$pool/.locks/0.last" ] || fail "clean removed the bookkeeping files" || return 1
+	slot_is_free "$wt1" 0 || fail "clean left dir 0 leased: $(slot_state "$wt1" 0)" || return 1
+	slot_state "$wt1" 2 | grep -q "leased by pid $a " || fail "holder lost its lease: $(slot_state "$wt1" 2)" || return 1
+
+	touch "$case_dir/go"
+	await_exit "$a" 15 || return 1
+	run_in "$wt1" target-pool clean || return 1
+	grep -q "emptied build dir $pool/2 " "$case_dir/out" || fail "second clean: $(cat "$case_dir/out")" || return 1
+	run_in "$wt1" target-pool clean || return 1
+	grep -q "already empty" "$case_dir/out" || fail "clean of an empty pool: $(cat "$case_dir/out")"
+}
+
 test_affinity() {
 	new_repo
 	export TARGET_POOL_SIZE=3
@@ -541,6 +647,47 @@ test_real_cargo_hand_off_rebuilds_members() {
 	expect_eq "from main, edited" "$(cat "$case_dir/out")" "main's output after handing back"
 }
 
+write_tool_workspace() { # <dir> <text>: a workspace of its own in tools/t, excluded by the root one
+	mkdir -p "$1/tools/t/src"
+	printf '[package]\nname = "t"\nversion = "0.1.0"\nedition = "2021"\n\n[workspace]\n' >"$1/tools/t/Cargo.toml"
+	printf 'fn main() {\n    println!("%s");\n}\n' "$2" >"$1/tools/t/src/main.rs"
+}
+
+# A build of another workspace through --manifest-path, from a dir that is a workspace
+# itself, must clear that workspace's fingerprints on a hand-off.
+test_real_cargo_manifest_path_hand_off() {
+	local real
+	real=$(PATH=$original_path command -v cargo) || {
+		printf '    skipped: cargo is not installed\n'
+		return 0
+	}
+	[ -n "$real" ] || return 0
+	local base=$case_dir/ws
+	mkdir -p "$base/main"
+	write_two_crate_workspace "$base/main" "root"
+	printf '[workspace]\nmembers = ["app", "greeting"]\nexclude = ["tools"]\nresolver = "2"\n' >"$base/main/Cargo.toml"
+	write_tool_workspace "$base/main" "tool from main"
+	(
+		cd "$base/main" &&
+			git -c init.defaultBranch=main init -q &&
+			git add -A && git commit -q -m init &&
+			git worktree add -q -b branch-b ../b
+	) || fail "couldn't create the workspace repo" || return 1
+	write_tool_workspace "$base/b" "tool from b"
+	touch -t 200001010000 "$base/b/tools/t/src/main.rs" "$base/b/tools/t/Cargo.toml"
+	write_tool_workspace "$base/main" "tool from main, edited"
+
+	local dir
+	for dir in main b main; do
+		run_in "$base/$dir" env PATH="$plugin_bin:$original_path" TARGET_POOL_SIZE=1 cargo run -q --offline --manifest-path tools/t/Cargo.toml || return 1
+		expect_status 0 "cargo run --manifest-path in $dir" || return 1
+		case $dir in
+			main) expect_eq "tool from main, edited" "$(cat "$case_dir/out")" "main's tool output" || return 1 ;;
+			b) expect_eq "tool from b" "$(cat "$case_dir/out")" "b's tool output after the hand-off" || return 1 ;;
+		esac
+	done
+}
+
 # --- runner ---------------------------------------------------------------------------------
 
 failures=0
@@ -561,10 +708,11 @@ run_case() { # <test function> [label]
 
 for test_name in test_lease_and_release test_pass_through_when_target_dir_set \
 	test_pass_through_non_build_and_outside_repo test_global_options_before_subcommand \
-	test_explicit_target_dir test_nested_cargo_inherits_lease test_finds_real_cargo \
-	test_exit_status_passthrough test_settings_validation test_pool_creation_failure \
-	test_status_outside_repo test_hand_off_clears_member_fingerprints test_signal_forwarding \
-	test_terminal_runs_in_foreground test_real_cargo_hand_off_rebuilds_members; do
+	test_project_options_pick_the_repo test_explicit_target_dir test_nested_cargo_inherits_lease \
+	test_finds_real_cargo test_exit_status_passthrough test_settings_validation \
+	test_pool_creation_failure test_status_outside_repo test_hand_off_clears_member_fingerprints \
+	test_hand_off_uses_the_built_workspace test_signal_forwarding test_terminal_runs_in_foreground \
+	test_real_cargo_hand_off_rebuilds_members test_real_cargo_manifest_path_hand_off; do
 	run_case "$test_name"
 done
 
@@ -576,8 +724,9 @@ else
 	lock_impls='mkdir'
 fi
 for impl in $lock_impls; do
-	for test_name in test_concurrent_runs_get_different_dirs test_waits_when_all_busy test_affinity \
-		test_size_cap test_background_process_does_not_keep_lease; do
+	for test_name in test_concurrent_runs_get_different_dirs test_waits_when_all_busy \
+		test_waiter_survives_pool_deletion test_affinity test_size_cap test_clean \
+		test_background_process_does_not_keep_lease; do
 		TARGET_POOL_LOCK_IMPL=$impl run_case "$test_name" "$impl"
 	done
 done

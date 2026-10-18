@@ -62,36 +62,62 @@ find_real_cargo() {
 	return 1
 }
 
-# True when the subcommand compiles into the target dir. Skips a leading +toolchain and
-# cargo's global options to find it.
-is_build_subcommand() {
+# Sets subcommand (the first argument after a leading +toolchain and cargo's global
+# options) and change_dir (the global -C dir).
+find_subcommand() {
+	subcommand=
+	change_dir=
 	case ${1:-} in +*) shift ;; esac
 	while [ $# -gt 0 ]; do
 		case $1 in
-			--color | --config | -Z | -C)
-				shift 2 || return 1
+			-C)
+				[ $# -ge 2 ] || return 0
+				change_dir=$2
+				shift 2
 				;;
-			--color=* | --config=* | -Z?* | -C?* | -v* | -q | --verbose | --quiet | --frozen | --locked | --offline)
+			-C?*)
+				change_dir=${1#-C}
+				shift
+				;;
+			--color | --config | -Z)
+				[ $# -ge 2 ] || return 0
+				shift 2
+				;;
+			--color=* | --config=* | -Z?* | -v* | -q | --verbose | --quiet | --frozen | --locked | --offline)
 				shift
 				;;
 			*) break ;;
 		esac
 	done
-	case ${1:-} in
+	subcommand=${1:-}
+}
+
+# True when the subcommand compiles into the target dir.
+is_build_subcommand() {
+	case $subcommand in
 		build | check | clippy | test | run | doc | bench | rustc | rustdoc | fix | b | c | t | r | d | nextest) return 0 ;;
 		*) return 1 ;;
 	esac
 }
 
-has_explicit_target_dir() {
-	local arg
-	for arg in "$@"; do
-		case $arg in
-			--) return 1 ;;
-			--target-dir | --target-dir=*) return 0 ;;
+# Sets manifest_path and explicit_target_dir from the arguments before `--` (the rest
+# belong to the program cargo runs).
+find_path_options() {
+	manifest_path=
+	explicit_target_dir=
+	while [ $# -gt 0 ]; do
+		case $1 in
+			--) return 0 ;;
+			--target-dir | --target-dir=*) explicit_target_dir=1 ;;
+			--manifest-path)
+				[ $# -ge 2 ] || return 0
+				manifest_path=$2
+				shift
+				;;
+			--manifest-path=*) manifest_path=${1#--manifest-path=} ;;
 		esac
+		shift
 	done
-	return 1
 }
 
 pool_disabled() {
@@ -108,8 +134,11 @@ if ! real_cargo=$(find_real_cargo); then
 	exit 127
 fi
 
-if pool_disabled || [ -n "${CARGO_TARGET_DIR:-}" ] || [ -n "${CARGO_BUILD_BUILD_DIR:-}" ] ||
-	has_explicit_target_dir "$@" || ! is_build_subcommand "$@"; then
+find_subcommand "$@"
+find_path_options "$@"
+
+if pool_disabled || [ -n "${CARGO_TARGET_DIR:-}" ] || [ -n "${CARGO_BUILD_TARGET_DIR:-}" ] ||
+	[ -n "${CARGO_BUILD_BUILD_DIR:-}" ] || [ -n "$explicit_target_dir" ] || ! is_build_subcommand; then
 	exec "$real_cargo" "$@"
 fi
 
@@ -118,4 +147,6 @@ if [ ! -x "$target_pool" ]; then
 	say "target-pool is missing next to the wrapper at $target_pool; reinstall the plugin, or set TARGET_POOL_DISABLE=1 to build without the pool"
 	exit 1
 fi
-exec "$target_pool" run -- "$real_cargo" "$@"
+# -C and --manifest-path tell target-pool which project the command builds, so the
+# repo, the pool and a hand-off's workspace come from it rather than the current dir.
+exec "$target_pool" run ${change_dir:+-C "$change_dir"} ${manifest_path:+--manifest-path "$manifest_path"} -- "$real_cargo" "$@"
