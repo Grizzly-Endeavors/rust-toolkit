@@ -72,13 +72,22 @@ make_repo() {
     mkdir -p "$WORKTREES"
 }
 
-# A linked worktree at .claude/worktrees/<name> with a target/ holding a file.
+# Writes the CACHEDIR.TAG cargo puts in every target dir it creates.
+tag_as_cargo() {
+    printf '%s\n' 'Signature: 8a477f597d28d172789f06886806bc55' \
+        '# This file is a cache directory tag created by cargo.' \
+        '# For information about cache directory tags see https://bford.info/cachedir/' >"$1/CACHEDIR.TAG"
+}
+
+# A linked worktree at .claude/worktrees/<name> with a cargo-made target/
+# holding a file.
 add_worktree() {
     local name="$1"
     (cd "$MAIN" && git_quiet worktree add --detach "$WORKTREES/$name") \
         || fail "could not add worktree $name"
     mkdir -p "$WORKTREES/$name/target/debug"
     printf 'artifact\n' >"$WORKTREES/$name/target/debug/artifact"
+    tag_as_cargo "$WORKTREES/$name/target"
 }
 
 # Age everything in a worktree outside target/, the worktree dir included.
@@ -144,6 +153,29 @@ test_stale_worktree_target_removed() {
     assert_summary_names stale
 }
 
+test_target_not_made_by_cargo_kept() {
+    make_repo
+    add_worktree untagged
+    add_worktree other-tool
+    add_worktree stale
+    rm "$WORKTREES/untagged/target/CACHEDIR.TAG"
+    printf 'Signature: 8a477f597d28d172789f06886806bc55\n# created by some other tool\n' \
+        >"$WORKTREES/other-tool/target/CACHEDIR.TAG"
+    age_worktree "$WORKTREES/untagged"
+    age_worktree "$WORKTREES/other-tool"
+    age_worktree "$WORKTREES/stale"
+    run_hook_in "$MAIN"
+    assert_status_zero
+    assert_exists "$WORKTREES/untagged/target/debug/artifact"
+    assert_exists "$WORKTREES/other-tool/target/debug/artifact"
+    assert_missing "$WORKTREES/stale/target"
+    assert_summary_names stale
+    case "$OUT" in
+        *untagged* | *other-tool*) fail "summary names a kept worktree: $OUT" ;;
+    esac
+    grep -q "keeping .*untagged/target" "$CASE_DIR/stderr" || fail "no stderr note about the untagged target"
+}
+
 test_fresh_worktree_kept() {
     make_repo
     add_worktree fresh
@@ -172,6 +204,7 @@ test_symlinked_target_refused() {
     rm -rf "$WORKTREES/linked/target"
     mkdir -p "$CASE_DIR/elsewhere"
     printf 'keep\n' >"$CASE_DIR/elsewhere/precious"
+    tag_as_cargo "$CASE_DIR/elsewhere"
     ln -s "$CASE_DIR/elsewhere" "$WORKTREES/linked/target"
     age_worktree "$WORKTREES/linked"
     run_hook_in "$MAIN"
@@ -186,6 +219,7 @@ test_symlinked_worktree_dir_refused() {
     make_repo
     mkdir -p "$CASE_DIR/outside/target"
     printf 'keep\n' >"$CASE_DIR/outside/target/precious"
+    tag_as_cargo "$CASE_DIR/outside/target"
     printf 'src\n' >"$CASE_DIR/outside/main.rs"
     age_worktree "$CASE_DIR/outside"
     ln -s "$CASE_DIR/outside" "$WORKTREES/via-link"
@@ -200,6 +234,7 @@ test_symlinked_worktrees_dir_refused() {
     rmdir "$WORKTREES"
     mkdir -p "$CASE_DIR/real-worktrees/wt/target"
     printf 'keep\n' >"$CASE_DIR/real-worktrees/wt/target/precious"
+    tag_as_cargo "$CASE_DIR/real-worktrees/wt/target"
     age_worktree "$CASE_DIR/real-worktrees/wt"
     ln -s "$CASE_DIR/real-worktrees" "$WORKTREES"
     run_hook_in "$MAIN"
@@ -226,6 +261,7 @@ test_pool_and_main_target_untouched() {
 test_non_repo_cwd_is_noop() {
     mkdir -p "$CASE_DIR/plain/.claude/worktrees/wt/target"
     printf 'keep\n' >"$CASE_DIR/plain/.claude/worktrees/wt/target/precious"
+    tag_as_cargo "$CASE_DIR/plain/.claude/worktrees/wt/target"
     age_worktree "$CASE_DIR/plain/.claude/worktrees/wt"
     # GIT_CEILING_DIRECTORIES keeps git from finding a repo above the scratch dir.
     run_hook_in "$CASE_DIR/plain" GIT_CEILING_DIRECTORIES="$CASE_DIR"

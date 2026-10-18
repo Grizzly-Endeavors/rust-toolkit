@@ -6,8 +6,8 @@
 # A worktree is idle when nothing in it outside target/ and .git has changed
 # for TARGET_POOL_PRUNE_HOURS hours (default 24). Only <worktree>/target is
 # ever deleted: symlinks are refused, for the worktree dir and for target, and
-# so is any target that does not resolve to exactly <worktree>/target. The
-# shared build pool under <main checkout>/target/ is never touched. The
+# so is any target that does not resolve to exactly <worktree>/target, and a
+# target without the CACHEDIR.TAG cargo writes is kept. The shared build pool under <main checkout>/target/ is never touched. The
 # worktree the session runs in is skipped, since the session may be about to
 # build there.
 #
@@ -36,6 +36,19 @@ session_cwd_from_stdin() {
     fi
     printf '%s' "$input" | tr '\n' ' ' \
         | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"\\]*\)".*/\1/p'
+}
+
+# Cargo writes a CACHEDIR.TAG (https://bford.info/cachedir/) into every target dir it
+# creates: the standard signature line first, then a comment naming cargo.
+made_by_cargo() {
+    local tag="$1/CACHEDIR.TAG" first=""
+    [ -f "$tag" ] && [ ! -L "$tag" ] || return 1
+    IFS= read -r first <"$tag" 2>/dev/null
+    [ "$first" = "Signature: 8a477f597d28d172789f06886806bc55" ] || return 1
+    case "$(cat "$tag" 2>/dev/null)" in
+        *"created by cargo"*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 json_escape() {
@@ -155,6 +168,12 @@ for worktree in "$worktrees_dir"/*; do
             continue
             ;;
     esac
+    # The hook runs in every repo a session opens, so a target/ that cargo did not
+    # make (tracked files, another tool's data) is left alone.
+    if ! made_by_cargo "$target"; then
+        note "keeping $target: it has no CACHEDIR.TAG written by cargo, so it may not be build output"
+        continue
+    fi
 
     # Any recent path outside target/ and .git keeps the worktree. A find that
     # fails before printing anything prints the marker instead, which keeps
