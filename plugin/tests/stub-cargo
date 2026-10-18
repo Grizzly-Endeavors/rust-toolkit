@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Stand-in for the real cargo in target-pool-test.sh. It logs each call to STUB_LOG and
+# behaves as the STUB_* variables below ask.
+
+set -u
+
+printf 'pid=%s target=%s args=%s\n' "$$" "${CARGO_TARGET_DIR:-<unset>}" "$*" >>"${STUB_LOG:?STUB_LOG must be set}"
+
+if [ "${1:-}" = metadata ]; then
+	if [ -n "${STUB_METADATA:-}" ]; then
+		cat "$STUB_METADATA"
+		exit 0
+	fi
+	echo "stub cargo: no STUB_METADATA given" >&2
+	exit 101
+fi
+
+# Dies of the signal like a real cargo would. Bash ignores SIGQUIT even with the trap
+# reset, so that one ends in the exit status a death by it would give.
+# shellcheck disable=SC2317 # invoked only from the traps below
+record_signal() {
+	printf '%s\n' "$1" >>"${STUB_SIGLOG:?STUB_SIGLOG must be set}"
+	trap - "$1"
+	kill -s "$1" "$$"
+	exit $((128 + $2))
+}
+
+if [ -n "${STUB_TRAP:-}" ]; then
+	trap 'record_signal INT 2' INT
+	trap 'record_signal TERM 15' TERM
+	trap 'record_signal HUP 1' HUP
+	trap 'record_signal QUIT 3' QUIT
+fi
+
+# STUB_NESTED: call cargo again through PATH, the way a build script or test would.
+if [ -n "${STUB_NESTED:-}" ]; then
+	(
+		unset STUB_NESTED STUB_READY STUB_HOLD STUB_EXIT
+		cargo build --inner
+	) || exit 70
+fi
+
+# STUB_DAEMON=<file>: leave a long-lived process behind and write its PID to <file>.
+if [ -n "${STUB_DAEMON:-}" ]; then
+	sleep 300 >/dev/null 2>&1 &
+	printf '%s\n' "$!" >"$STUB_DAEMON"
+fi
+
+if [ -n "${STUB_FILL_KB:-}" ]; then
+	dd if=/dev/zero of="$CARGO_TARGET_DIR/fill" bs=1024 count="$STUB_FILL_KB" 2>/dev/null
+fi
+
+# STUB_FINGERPRINTS: lay out fingerprint dirs the way cargo does, for the hand-off test.
+if [ -n "${STUB_FINGERPRINTS:-}" ]; then
+	for fp in "$CARGO_TARGET_DIR/debug/.fingerprint" "$CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release/.fingerprint"; do
+		mkdir -p "$fp"
+		for unit in $STUB_FINGERPRINTS; do
+			mkdir -p "$fp/$unit"
+		done
+	done
+fi
+
+if [ -n "${STUB_READ_STDIN:-}" ]; then
+	IFS= read -r line
+	printf '%s\n' "$line" >"$STUB_READ_STDIN"
+fi
+
+if [ -n "${STUB_READY:-}" ]; then
+	printf '%s\n' "$CARGO_TARGET_DIR" >"$STUB_READY.tmp"
+	mv "$STUB_READY.tmp" "$STUB_READY"
+fi
+
+# STUB_HOLD=<file>: keep running until <file> exists (or a minute passes).
+if [ -n "${STUB_HOLD:-}" ]; then
+	waited=0
+	while [ ! -e "$STUB_HOLD" ] && [ "$waited" -lt 1200 ]; do
+		sleep 0.05
+		waited=$((waited + 1))
+	done
+fi
+
+if [ -n "${STUB_SELF_SIGNAL:-}" ]; then
+	kill -s "$STUB_SELF_SIGNAL" "$$"
+fi
+
+exit "${STUB_EXIT:-0}"
