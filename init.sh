@@ -48,12 +48,6 @@ if [ -d plugin ]; then
     echo "  removed plugin/"
 fi
 
-# The plugin-test recipe exists only to check plugin/, so it goes with it. The
-# block runs from its comment header to the blank line after the recipe.
-if [ -f justfile ]; then
-    sed -i '/^# Shellcheck and the test scripts for plugin\//,/^$/d' justfile
-fi
-
 # Rewrite both spellings: Cargo and the filesystem use kebab-case, Rust paths
 # use snake_case, and the two differ whenever the name contains a hyphen.
 FILES=$(grep -rl -e "$PLACEHOLDER_KEBAB" -e "$PLACEHOLDER_SNAKE" \

@@ -29,40 +29,13 @@ STAGED_MANIFEST="$(git diff --cached --name-only --diff-filter=ACM -- '*.toml' '
 # bin file changes what the plugin's checks cover, so it must pass the gate too.
 STAGED_PLUGIN="$(git diff --cached --name-only -- plugin)"
 
-# The plugin is shell with no compiler behind it, so nothing else would catch a
-# broken script or a failing test before it lands. Runs before the Rust exit
-# below so a plugin-only commit is checked too. Generated projects delete
-# plugin/, so this never triggers there: nothing under plugin/ can be staged.
-plugin_gate() {
-    if ! command -v shellcheck >/dev/null 2>&1; then
-        fail "ERROR: shellcheck is needed to commit changes under plugin/ and is not installed.\n      Install with: sudo apt install shellcheck"
-    fi
-
-    # Literal glob patterns that match nothing stay as text and fail the -f
-    # test, so a deleted file is skipped rather than handed to shellcheck.
-    local -a scripts=()
-    local candidate
-    for candidate in plugin/bin/* plugin/hooks/session-path plugin/hooks/prune-worktree-targets plugin/tests/*.sh plugin/tests/stub-cargo; do
-        [ -f "$candidate" ] && scripts+=("$candidate")
-    done
-
-    echo "Linting plugin..."
-    shellcheck "${scripts[@]}" \
-        || fail "ERROR: shellcheck found issues in plugin/."
-
-    local test
-    for test in plugin/tests/*-test.sh; do
-        [ -f "$test" ] || continue
-        echo "Testing ${test}..."
-        # git sets GIT_DIR and GIT_INDEX_FILE for hooks, which would point the
-        # tests' throwaway repos at this checkout. Clear them for the test run.
-        env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE bash "$test" \
-            || fail "ERROR: plugin test failed: ${test}"
-    done
-}
-
-if [ -n "$STAGED_PLUGIN" ]; then
-    plugin_gate
+# The plugin's checks live in plugin/tests/run-all.sh. Generated projects delete
+# plugin/ (init.sh), so the script is absent there and this gate does nothing.
+# Runs before the Rust exit below so a plugin-only commit is checked too.
+if [ -n "$STAGED_PLUGIN" ] && [ -f plugin/tests/run-all.sh ]; then
+    echo "Checking plugin..."
+    env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE bash plugin/tests/run-all.sh \
+        || fail "ERROR: plugin checks failed. See the list above."
 fi
 
 if [ -z "$STAGED_RUST" ] && [ -z "$STAGED_MANIFEST" ]; then
