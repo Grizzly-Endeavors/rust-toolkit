@@ -10,6 +10,11 @@
 
 set -u
 
+# A test run from a git hook inherits GIT_DIR and the other variables that point git
+# at a repo, so its git commands would act on the enclosing repo. Clear them all.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
+    GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_PREFIX GIT_CEILING_DIRECTORIES
+
 tests_dir=$(cd "$(dirname "$0")" && pwd -P)
 plugin_bin=$(cd "$tests_dir/../bin" && pwd -P)
 original_path=$PATH
