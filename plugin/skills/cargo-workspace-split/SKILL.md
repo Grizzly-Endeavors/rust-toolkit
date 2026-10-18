@@ -47,7 +47,7 @@ Signs of a bad seam: many `pub(crate)` items that would have to become `pub` to 
 
 ## Workspace manifest
 
-Keep the existing package at the root and add members under `crates/<dir>/`, each named `<project>-<dir>`. The root manifest is both the workspace and the root package:
+Keeping the existing package at the root, with members under `crates/<dir>/` named `<project>-<dir>`, leaves every existing path, the binary's location and the root sources' `git log` unchanged, so it suits an incremental split. A virtual workspace (a root manifest with only `[workspace]`, every package under `crates/`) fits a split that moves the whole crate in one step, or a root that should hold no code. The examples below use the first layout, where the root manifest is both the workspace and the root package:
 
 ```toml
 [package]
@@ -79,6 +79,7 @@ myproj-config = { path = "crates/config" }
 unsafe_code = "deny"
 
 [workspace.lints.clippy]
+# Illustrative entries only; the real table is whatever the project already uses.
 pedantic = { level = "warn", priority = -1 }
 unwrap_used = "deny"
 # ...move the whole existing [lints.*] table here unchanged
@@ -104,7 +105,7 @@ serde = { workspace = true, features = ["derive"] } # features add to the worksp
 workspace = true
 ```
 
-- Move the lint table verbatim; changing a lint level during a split needs the user's approval like any other lint change.
+- Move the lint table verbatim. Keep lint changes out of the split, so each move stays a mechanical diff; make any lint change in a separate commit.
 - Every member carries `[lints] workspace = true`. A member without it compiles with no project lints and nothing reports it, so add a check that fails on a member manifest missing it (a test or hook that reads each `crates/*/Cargo.toml`).
 - Declare every third-party version once in `[workspace.dependencies]` and every internal crate there by path, so members never repeat a version or a path.
 - `clippy.toml`, `rustfmt.toml` and `deny.toml` at the workspace root apply to every member; don't copy them into members.

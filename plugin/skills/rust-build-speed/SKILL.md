@@ -18,6 +18,7 @@ Every later decision compares against these numbers, so take them carefully.
    - **no-op**: the same command again with nothing changed. Anything above a second or two means something is rebuilding every time (step 8).
    - **leaf edit**: a one-line change inside a function body of the top crate (the binary or the crate nothing depends on), then rebuild.
    - **low edit**: the same in a crate most of the workspace depends on, then rebuild.
+
    Make the edit differ on every run, for example by toggling a line between two versions; `touch` alone undersells the cost because rustc's incremental cache sees identical content. `hyperfine --prepare '<toggle edit>' '<build command>'` automates this if it is installed.
 4. **See where the time goes:** `cargo build --timings` writes an HTML report and prints "Timing report saved to <path>"; open that path, since under the pool the target dir is a pool dir. Look for long single crates on the critical path, a long tail of one crate building alone, proc-macro and build-script crates that gate everything after them, and link time of the final binaries and test binaries.
 5. **Disk writes** (when disk is the concern): on Linux, `/usr/bin/time -v cargo build` reports "File system outputs" in 512-byte blocks; on macOS, `/usr/bin/time -l` reports block output operations. `du -sk <target dir>` before and after gives growth.
