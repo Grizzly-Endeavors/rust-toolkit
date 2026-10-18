@@ -27,6 +27,13 @@ deny:
 # The full local gate. Run this before pushing.
 ci-local: fmt-check lint test deny
 
+# Shellcheck and the test scripts for plugin/, the same checks the pre-commit
+# gate runs when a commit touches plugin/. Toolkit only: init.sh deletes this
+# block, along with plugin/, from generated projects.
+plugin-test:
+    shellcheck plugin/bin/* plugin/hooks/session-path plugin/hooks/prune-worktree-targets plugin/tests/*.sh plugin/tests/stub-cargo
+    for test in plugin/tests/*-test.sh; do bash "$test"; done
+
 # Install the git hooks (once per clone, and once per new worktree is harmless).
 hooks:
     ./.githooks/install.sh
