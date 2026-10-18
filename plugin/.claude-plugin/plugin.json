@@ -7,6 +7,5 @@
   },
   "homepage": "https://github.com/Grizzly-Endeavors/rust-toolkit",
   "repository": "https://github.com/Grizzly-Endeavors/rust-toolkit",
-  "license": "MIT",
   "keywords": ["rust", "cargo", "build", "target-dir", "worktree", "agents"]
 }

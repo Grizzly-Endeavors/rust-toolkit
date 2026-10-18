@@ -16,7 +16,7 @@ cd my-project
 
 ## The Claude Code plugin
 
-`plugin/` holds `rust-build`, a Claude Code plugin for projects whose agents build in parallel git worktrees. It keeps a pool of warm Cargo target directories so a fresh worktree doesn't pay a cold build, and it ships two skills on build speed and workspace splitting. It lives here in the toolkit, not in the generated project: `init.sh` deletes `plugin/` when it turns the template into a project. To install it, follow the steps in [plugin/README.md](plugin/README.md), which also covers how it works and what it changes.
+`plugin/` holds `rust-build`, a Claude Code plugin for projects whose agents build in parallel git worktrees. It keeps a pool of warm Cargo target directories so a fresh worktree doesn't pay a cold build, and it ships two skills on build speed and workspace splitting. It lives here in the toolkit, not in the generated project: `init.sh` deletes `plugin/` when it turns the template into a project. To install it, follow the steps in [plugin/README.md](https://github.com/Grizzly-Endeavors/rust-toolkit/blob/main/plugin/README.md), which also covers how it works and what it changes.
 
 ## What you need
 
